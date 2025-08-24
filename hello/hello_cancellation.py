@@ -1,13 +1,17 @@
 import asyncio
+import multiprocessing
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from datetime import timedelta
 from typing import NoReturn
 
 from temporalio import activity, workflow
 from temporalio.client import Client, WorkflowFailureError
 from temporalio.exceptions import ActivityError, CancelledError
-from temporalio.worker import Worker
+from temporalio.worker import (
+    SharedStateManager,
+    Worker,
+)
 
 
 @activity.defn
@@ -40,7 +44,7 @@ class CancellationWorkflow:
         try:
             await workflow.execute_activity(
                 never_complete_activity,
-                start_to_close_timeout=timedelta(seconds=1000),
+                start_to_close_timeout=timedelta(seconds=20),
                 # Always set a heartbeat timeout for long-running activities
                 heartbeat_timeout=timedelta(seconds=2),
             )
@@ -59,13 +63,21 @@ async def main():
     # Start client
     client = await Client.connect("localhost:7233")
 
+    # Note: the given activity running in a process pool will run forever,
+    # preventing the worker from shutting down. Cancellation in mp activities
+    # also doesn't work for heartbeat timeout cancellations either, leading
+    # to wasted resources and pool starvation.
+
     # Run a worker for the workflow
     async with Worker(
         client,
         task_queue="hello-cancellation-task-queue",
         workflows=[CancellationWorkflow],
         activities=[never_complete_activity, cleanup_activity],
-        activity_executor=ThreadPoolExecutor(5),
+        activity_executor=ProcessPoolExecutor(max_workers=5),
+        shared_state_manager=SharedStateManager.create_from_multiprocessing(
+            multiprocessing.Manager()
+        ),
     ):
         # While the worker is running, use the client to start the workflow.
         # Note, in many production setups, the client would be in a completely
